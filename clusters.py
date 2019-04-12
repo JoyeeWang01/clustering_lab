@@ -1,11 +1,20 @@
+from __future__ import print_function
 from PIL import Image,ImageDraw
 from math import *
 import random
+import sys
+warned_of_error = False
+import csv
+from nltk.corpus import stopwords
+import pygame
+import simplejson
+from pytagcloud import create_tag_image, make_tags
+
 
 def readfile(file_name):
     f = open(file_name)
     lines=[line for line in f]
-  
+
     # First line is the column titles
     colnames=lines[0].strip().split('\t')[:]
     print(colnames)
@@ -20,6 +29,86 @@ def readfile(file_name):
             data.append([float(x) for x in p[1:]])
     return rownames,colnames,data
 
+def readfile_country(file_name):
+    f = open(file_name)
+    lines=[line for line in f]
+  
+    # First line is the column titles
+    colnames=lines[0].strip().split(',')[:]
+    rownames1=[]
+    rownames2=[]
+    data=[]
+    for line in lines[1:]:
+        p=line.strip().split(',')
+        # First column in each row is the rowname
+        if len(p)>2:
+            rownames1.append(p[0])
+            rownames2.append(p[1])
+            # The data for this row is the remainder of the row
+            data_line = []
+            for x in p[2:]:
+                if x != '':
+                    data_line.append(float(x))
+                else:
+                    data_line.append(-1)
+            data.append(data_line[:-1]) #delete isregion
+
+    return rownames1,rownames2,colnames,data
+
+def data_preparation(file_name):
+    read_result = readfile_country(file_name)
+    rownames1 = read_result[0]
+    rownames2 = read_result[1]
+    colnames = read_result[2]
+    data = read_result[3]
+
+    line_pos = 0
+    for line in data:
+        data_index = []
+        missing_index = []
+        for i in range(len(line)):
+            if line[i] != -1:
+                data_index.append(i)
+            else:
+                missing_index.append(i)
+        if len(data_index) != len(line):
+            distance = [0]*len(data)
+            pos = 0
+            invalid = False
+            for line1 in data:
+                sum = 0
+                for i in data_index:
+                    if line1[i] == -1:
+                        distance[pos] = sys.maxsize
+                        invalid = True
+                        pos += 1
+                        break
+                    sum += (line1[i]-line[i])*(line1[i]-line[i])
+                if invalid:
+                    invalid = False
+                    continue
+                distance[pos] = sum
+                pos += 1
+            nearest = [line_pos, line_pos, line_pos, line_pos]
+            for time in range(3):
+                min = sys.maxsize
+                for i in range(len(distance)):
+                    if i not in nearest:
+                        if distance[i] < min:
+                            min = distance[i]
+                            nearest[time] = i
+            for i in missing_index:
+                sum = 0
+                added = 0
+                for j in range(3):
+                    if data[nearest[j]][i] == -1:
+                        continue
+                    sum += data[nearest[j]][i]
+                    added += 1
+                data[line_pos][i] = round(sum/added, 0)
+        line_pos += 1
+
+    return rownames1, rownames2, colnames, data
 
 def rotatematrix(data):
     newdata=[]
@@ -115,8 +204,78 @@ class bicluster:
         self.id=id
         self.distance=distance
 
+id_list = []
+def find_all(current):
+    if current.id >= 0:
+        id_list.append(current.id)
+    else:
+        if current.left != None:
+            find_all(current.left)
+        if current.right!= None:
+            find_all(current.right)
 
-def hcluster(rows,distance=euclidean):
+
+def min_dis(rows, distance, clust, i, j):
+    global id_list
+    id_list = []
+    find_all(clust[i])
+    i_id = id_list.copy()
+
+    id_list = []
+    find_all(clust[j])
+    j_id = id_list.copy()
+
+    mini = sys.maxsize
+    for h in i_id:
+        for k in j_id:
+            d = distance(rows[h], rows[k])
+            if d<mini:
+                mini = d
+
+    return mini
+
+def max_dis(rows, distance, clust, i, j):
+    global id_list
+    id_list = []
+    find_all(clust[i])
+    i_id = id_list.copy()
+
+    id_list = []
+    find_all(clust[j])
+    j_id = id_list.copy()
+
+    maxi = -1
+    for h in i_id:
+        for k in j_id:
+            d = distance(rows[h], rows[k])
+            if d>maxi:
+                maxi = d
+
+    return maxi
+
+def ave_dis(rows, distance, clust, i, j):
+    global id_list
+    id_list = []
+    find_all(clust[i])
+    i_id = id_list.copy()
+
+    id_list = []
+    find_all(clust[j])
+    j_id = id_list.copy()
+
+    num = 0
+    sum = 0
+    for h in i_id:
+        for k in j_id:
+            sum += distance(rows[h], rows[k])
+            num += 1
+
+    return sum/num
+
+def centroid_dis(rows, distance, clust, i, j):
+    return distance(clust[i].vec,clust[j].vec)
+
+def hcluster(rows, inter_dis, distance=euclidean):
     distances={}
     currentclustid=-1
 
@@ -132,7 +291,7 @@ def hcluster(rows,distance=euclidean):
             for j in range(i+1,len(clust)):
                 # distances is the cache of distance calculations
                 if (clust[i].id,clust[j].id) not in distances:
-                    distances[(clust[i].id,clust[j].id)]=distance(clust[i].vec,clust[j].vec)
+                    distances[(clust[i].id,clust[j].id)]=inter_dis(rows, distance, clust, i, j)
 
                 d=distances[(clust[i].id,clust[j].id)]
 
@@ -157,6 +316,25 @@ def hcluster(rows,distance=euclidean):
         clust.append(newcluster)
 
     return clust[0]
+
+def best_inter_distance_for_countries():
+    data_result = data_preparation("dataset.csv")
+    rownames1 = data_result[0]
+    rownames2 = data_result[1]
+    colnames = data_result[2]
+    data = data_result[3]
+
+    clust=hcluster(data,min_dis, euclidean)
+    drawdendrogram(clust,rownames2,jpeg='countries_MIN.jpg')
+
+    clust=hcluster(data,max_dis, euclidean)
+    drawdendrogram(clust,rownames2,jpeg='countries_MAX.jpg')
+
+    clust=hcluster(data,ave_dis, euclidean)
+    drawdendrogram(clust,rownames2,jpeg='countries_group_average.jpg')
+
+    clust=hcluster(data,centroid_dis, euclidean)
+    drawdendrogram(clust,rownames2,jpeg='countries_centroid_distance.jpg')
 
 
 def printhclust(clust,labels=None,n=0):
@@ -254,7 +432,6 @@ def kcluster(rows,distance=euclidean,k=4):
     bestmatches = None
 
     for t in range(100):
-        print ('Iteration %d' % t)
         bestmatches=[[] for i in range(k)]
     
         # Find which centroid is the closest for each row
@@ -281,7 +458,7 @@ def kcluster(rows,distance=euclidean,k=4):
                     avgs[j]/=len(bestmatches[i])
                 clusters[i]=avgs
       
-    return bestmatches
+    return bestmatches, clusters
 
 
 def scaledown(data,distance=pearson,rate=0.01):
@@ -343,3 +520,343 @@ def draw2d(data,labels,jpeg='mds2d.jpg'):
         draw.text((x,y),labels[i],(0,0,0))
     img.save(jpeg,'JPEG')
 
+def sse(rows, distance, bestmatches, clusters):
+    k = len(bestmatches)
+    sum = 0
+    for i in range(k):
+        for rowid in bestmatches[i]:
+            d = distance(clusters[i],rows[rowid])
+            sum += d*d
+    return sum
+
+def bisectkcluster(rows,distance=euclidean,k=4):
+    num_trial = 5
+    result = []
+    result_center = []
+
+    for i in range(k-1):
+        max_sse = -1
+        separateid = -1
+        for clusterid in range(len(result)):
+            test_sse = sse(rows, distance, [result[clusterid]], [result_center[clusterid]])
+            if test_sse>max_sse:
+                max_sse = test_sse
+                separateid = clusterid
+        if separateid == -1:
+            new_rows = rows
+        else:
+            new_rows = [rows[line] for line in result[separateid]]
+
+        min_sse = sys.maxsize
+        for time in range(num_trial):
+            trial = kcluster(new_rows,distance,2)
+            trial_sse = sse(new_rows, distance, trial[0], trial[1])
+            if trial_sse < min_sse:
+                best_bisection = trial
+                min_sse = trial_sse
+        if separateid != -1:
+            result_buffer1 = [result[separateid][index] for index in best_bisection[0][0]]
+            result_buffer2 = [result[separateid][index] for index in best_bisection[0][1]]
+            result.pop(separateid)
+            result_center.pop(separateid)
+            result.append(result_buffer1)
+            result.append(result_buffer2)
+        else:
+            result.append(best_bisection[0][0])
+            result.append(best_bisection[0][1])
+        result_center.append(best_bisection[1][0])
+        result_center.append(best_bisection[1][1])
+    return result, result_center
+
+def best_distance_for_countries():
+    data_result = data_preparation("dataset.csv")
+    rownames1 = data_result[0]
+    rownames2 = data_result[1]
+    colnames = data_result[2]
+    data = data_result[3]
+    sse_list = []
+
+    result = bisectkcluster(data, euclidean, 5)
+    bestmatches = result[0]
+    clusters = result[1]
+    print("clusters by euclidean distance")
+    sse_list.append(sse(data, euclidean, bestmatches, clusters))
+    print("SSE =", sse_list[-1])
+    for i in range(5):
+        print("Cluster", i)
+        print([rownames2[j] for j in bestmatches[i]])
+
+    print()
+    result = bisectkcluster(data, pearson, 5)
+    bestmatches = result[0]
+    clusters = result[1]
+    print("clusters by pearson correlation")
+    sse_list.append(sse(data, euclidean, bestmatches, clusters))
+    print("SSE =", sse_list[-1])
+    for i in range(5):
+        print("Cluster", i)
+        print([rownames2[j] for j in bestmatches[i]])
+
+    print()
+    result = bisectkcluster(data, cosine, 5)
+    bestmatches = result[0]
+    clusters = result[1]
+    print("clusters by cosine distance")
+    sse_list.append(sse(data, euclidean, bestmatches, clusters))
+    print("SSE =", sse_list[-1])
+    for i in range(5):
+        print("Cluster", i)
+        print([rownames2[j] for j in bestmatches[i]])
+
+    print()
+    result = bisectkcluster(data, manhattan, 5)
+    bestmatches = result[0]
+    clusters = result[1]
+    print("clusters by manhattan distance")
+    sse_list.append(sse(data, euclidean, bestmatches, clusters))
+    print("SSE =", sse_list[-1])
+    for i in range(5):
+        print("Cluster", i)
+        print([rownames2[j] for j in bestmatches[i]])
+    print()
+
+    print(sse_list)
+    print()
+
+def best_k_for_countries():
+    data_result = data_preparation("dataset.csv")
+    rownames1 = data_result[0]
+    rownames2 = data_result[1]
+    colnames = data_result[2]
+    data = data_result[3]
+    sse_list = []
+
+    for k in range(2, 16):
+        result = bisectkcluster(data, euclidean, k)
+        bestmatches = result[0]
+        clusters = result[1]
+        print("separate into", k, "clusters")
+        sse_list.append(sse(data, euclidean, bestmatches, clusters))
+        print("SSE =", sse_list[-1])
+        for i in range(k):
+            print("Cluster", i)
+            print([rownames2[j] for j in bestmatches[i]])
+        print()
+    print(sse_list)
+
+def compare_bisecting():
+    data_result = data_preparation("dataset.csv")
+    rownames1 = data_result[0]
+    rownames2 = data_result[1]
+    colnames = data_result[2]
+    data = data_result[3]
+    sum_k = 0
+    sum_bisect = 0
+
+    for time in range(10):
+        result = bisectkcluster(data, euclidean, 6)
+        bestmatches = result[0]
+        clusters = result[1]
+        sum_bisect += sse(data, euclidean, bestmatches, clusters)
+
+    for time in range(10):
+        result = kcluster(data, euclidean, 6)
+        bestmatches = result[0]
+        clusters = result[1]
+        sum_k += sse(data, euclidean, bestmatches, clusters)
+
+    print("SSE by normal k-means algorithm:", sum_k/10)
+    print("SSE by bisecting k-means algorithm:", sum_bisect/10)
+    print()
+
+def output_result_and_label():
+    data_result = data_preparation("dataset.csv")
+    rownames1 = data_result[0]
+    rownames2 = data_result[1]
+    colnames = data_result[2]
+    data = data_result[3]
+    result = bisectkcluster(data, euclidean, 6)
+
+    file_object = open('result.csv', 'w', newline='')
+    writeCSV = csv.writer(file_object, delimiter=',')
+    for cluster in result[0]:
+        writeCSV.writerow([rownames2[i] for i in cluster])
+
+    file_object.close()
+
+    descriptive_label(data, result[0])
+
+def to_json():
+    first_line = True
+    file_object = open('./public_html/data.js', 'w', newline='')
+    file_object.write("var data1 = [")
+    with open("result.csv", encoding="utf-8") as csvfile:
+        readCSV = csv.reader((line.replace('\0','') for line in csvfile), delimiter=',')
+        i = 0
+        for row in readCSV:
+            cluster = list(row)
+            print(cluster)
+            for c in cluster:
+                if first_line:
+                    file_object.write(write_content(first_line, c, i))
+                    first_line = False
+                else:
+                    file_object.write(write_content(first_line, c, i))
+            i += 1
+    file_object.write('];')
+    file_object.close()
+    csvfile.close()
+
+def write_content(first_line, c, i):
+    line = ""
+    if not first_line:
+        line += ', '
+    if c == "Arab countries":
+        countries = ["Bahrain", "Comoros", "Djibouti", "Kuwait", "Lebanon", "Libya", "Mauritania", "Oman", "Palestine", "Qatar", "Somalia", "Sudan", "Syria", "Tunisia", "United Arab Emirates", "Yemen"]
+        for country in countries[:-1]:
+            line += '{"Country": "' + country + '", "Cluster": ' + str(i) + '}, '
+        line += '{"Country": "' + countries[-1] + '", "Cluster": ' + str(i) + '}'
+    elif c == "Africa West":
+        countries = ["Benin", "Cabo Verde", "Ivory Coast", "Gambia", "Guinea", "Guinea-Bissau", "Liberia", "Niger", "Senegal", "Sierra Leone", "Togo"]
+        for country in countries[:-1]:
+            line += '{"Country": "' + country + '", "Cluster": ' + str(i) + '}, '
+        line += '{"Country": "' + countries[-1] + '", "Cluster": ' + str(i) + '}'
+    elif c == "Africa East":
+        countries = ["Eritrea", "Ethiopia", "South Sudan", "Madagascar", "Mauritius", "Seychelles", "Reunion", "Mayotte", "Burundi", "Kenya", "Malawi", "Mozambique"]
+        for country in countries[:-1]:
+            line += '{"Country": "' + country + '", "Cluster": ' + str(i) + '}, '
+        line += '{"Country": "' + countries[-1] + '", "Cluster": ' + str(i) + '}'
+    elif c == "Slovak Rep":
+        line += '{"Country": "' + "Slovakia" + '", "Cluster": ' + str(i) + '}'
+    elif c == "Czech Rep":
+        line += '{"Country": "' + "Czech Republic" + '", "Cluster": ' + str(i) + '}'
+    elif c == "Dominican Rep":
+        line += '{"Country": "' + "Dominican Republic" + '", "Cluster": ' + str(i) + '}'
+    elif c == "Kyrgyz Rep":
+        line += '{"Country": "' + "Kyrgyzstan" + '", "Cluster": ' + str(i) + '}'
+    elif c == "Macedonia Rep":
+        line += '{"Country": "' + "Macedonia" + '", "Cluster": ' + str(i) + '}'
+    elif c == "U.S.A.":
+        line += '{"Country": "' + "United States" + '", "Cluster": ' + str(i) + '}'
+    elif c == "Korea South":
+        line += '{"Country": "' + "South Korea" + '", "Cluster": ' + str(i) + '}'
+    else:
+        line += '{"Country": "' + c + '", "Cluster": ' + str(i) + '}'
+    return line
+
+import numpy as np
+import seaborn as sns
+def heat_map(rows, clusters, output_name):
+    sns.set()
+
+    difference = np.empty([len(rows), len(rows)], float)
+
+    row = 0
+    col = 0
+    for cluster_i in clusters:
+        for i in cluster_i:
+            for cluster_j in clusters:
+                for j in cluster_j:
+                    difference[row, col] = euclidean(rows[i], rows[j])
+                    col += 1
+            col = 0
+            row += 1
+
+    i = 0
+    axis = []
+    for cluster in clusters:
+        axis += ['']*len(cluster)
+        axis.append("C"+str(i))
+        i += 1
+    ax = sns.heatmap(difference, xticklabels=axis, yticklabels=axis)
+    ax.get_figure().savefig(output_name)
+
+hierarchical = []
+def cut_hierarchical(top_cluster, depth):
+    global id_list
+
+    if depth == 0:
+        id_list = []
+        find_all(top_cluster)
+        hierarchical.append(id_list.copy())
+    else:
+        if top_cluster.left != None:
+            cut_hierarchical(top_cluster.left, depth-1)
+        if top_cluster.right != None:
+            cut_hierarchical(top_cluster.right, depth-1)
+
+
+def create_cloud (oname, words, maxsize=60, fontname='Lobster'):
+    '''Creates a word cloud (when pytagcloud is installed)
+    Parameters
+    ----------
+    oname : output filename
+    words : list of (value,str)
+    maxsize : int, optional
+        Size of maximum word. The best setting for this parameter will often
+        require some manual tuning for each input.
+    fontname : str, optional
+        Font to use.
+    '''
+
+    # gensim returns a weight between 0 and 1 for each word, while pytagcloud
+    # expects an integer word count. So, we multiply by a large number and
+    # round. For a visualization this is an adequate approximation.
+
+    #words = [(w,int(v*1000)) for w,v in words]
+    tags = make_tags(words, maxsize=maxsize)
+    create_tag_image(tags, oname, size=(2000, 2000), fontname=fontname)
+
+def descriptive_label(rows, clusters):
+    words = [None]*6
+    count = -1
+    with open('dimensions_keywords.csv') as csvfile:
+        csvreader = csv.reader(csvfile, delimiter=',', quotechar='"')
+        for row in csvreader:
+            if count == -1:
+                count += 1
+                continue
+            list(row)
+            words[count] = [row[1].split(), row[2].split()]
+            count += 1
+
+    count = 0
+    for cluster in clusters:
+        centroid = [0]*6
+        num = 0
+        word_dic = []
+        for i in cluster:
+            for j in range(6):
+                centroid[j] += rows[i][j]
+            num += 1
+        for i in range(6):
+            centroid[i] = int(centroid[i]/num)
+            print(centroid[i],end = ' ')
+            for w in words[i][0]:
+                word_dic.append((w, centroid[i]))
+            for w in words[i][1]:
+                word_dic.append((w, 100-centroid[i]))
+        print()
+        create_cloud("word_cloud_cluster_"+str(count)+".png", word_dic)
+        count += 1
+'''
+data_result = data_preparation("dataset.csv")
+rownames1 = data_result[0]
+rownames2 = data_result[1]
+colnames = data_result[2]
+data = data_result[3]
+result = bisectkcluster(data, euclidean, 6)
+descriptive_label(data, result[0])
+
+clust= hcluster(data, max_dis, euclidean)
+cut_hierarchical(clust, 3)
+heat_map(data, hierarchical, "hierarchical_heat_map.png")
+'''
+#best_distance_for_countries()
+#best_k_for_countries()
+#compare_bisecting()
+
+#output_result()
+#to_json()
+
+#best_inter_distance_for_countries()
